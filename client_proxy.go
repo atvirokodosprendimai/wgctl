@@ -39,23 +39,28 @@ func startClientProxy(cfg *ClientConfig, listenPort int, target string) (*http.S
 }
 
 func proxyListenAddr(cfg *ClientConfig, port int) (string, error) {
-	for _, prefix := range cfg.Interface.Address {
-		ip := prefix.Addr().Unmap()
-		if !ip.Is4() {
-			continue
-		}
-		return net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port)), nil
-	}
+	_ = cfg
+	return net.JoinHostPort("", fmt.Sprintf("%d", port)), nil
 
-	for _, prefix := range cfg.Interface.Address {
-		ip := prefix.Addr().Unmap()
-		if !ip.Is6() {
-			continue
+	/*
+		for _, prefix := range cfg.Interface.Address {
+			ip := prefix.Addr().Unmap()
+			if !ip.Is4() {
+				continue
+			}
+			return net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port)), nil
 		}
-		return net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port)), nil
-	}
 
-	return "", fmt.Errorf("cannot start proxy: client has no interface address")
+		for _, prefix := range cfg.Interface.Address {
+			ip := prefix.Addr().Unmap()
+			if !ip.Is6() {
+				continue
+			}
+			return net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port)), nil
+		}
+
+		return "", fmt.Errorf("cannot start proxy: client has no interface address")
+	*/
 }
 
 func normalizeLabels(raw string) []string {

@@ -31,18 +31,25 @@ or enroll from head:
 
 # with ingress registration + local proxy
 ./wgctl run -head http://127.0.0.1:8080 -token supersecret \
-  -labels web1,web2 -domain something.domain.tld \
+  -labels web1,web2 -domains something.domain.tld,api.domain.tld \
   -to http://localhost:9999 -proxy-port 18080
+
+# multi-head client (two independent WG peers)
+./wgctl run -heads http://h1:8080,http://h2:8080 -tokens t1,t2 \
+  -domains app.domain.tld,api.domain.tld -to http://localhost:9999
 ```
 
 Flags:
 
 - `-config`: path to config file (required)
 - `-head`: head API base URL for dynamic config
+- `-heads`: comma-separated head API URLs for multi-head mode
 - `-token`: shared token for head enrollment
+- `-tokens`: comma-separated tokens mapped to `-heads` (or single token for all)
 - `-private-key`: client private key for head mode (if omitted, an ephemeral key is generated)
 - `-labels`: comma-separated labels to register on head ingress
-- `-domain`: domain suffix used by head ingress (hosts become `<label>.<domain>`)
+- `-domain`: single exact domain routed to this node
+- `-domains`: comma-separated exact domains routed to this node
 - `-to`: start local reverse proxy and forward to upstream URL
 - `-proxy-port`: local proxy listen port for head->client forwarding (default `18080`)
 - `-name`: tunnel interface name (default `wg0`)
@@ -65,6 +72,7 @@ Example `head.json`:
   "listen_addr": ":8080",
   "ingress_listen_addr": ":80",
   "endpoint": "203.0.113.10:51820",
+  "endpoints": ["203.0.113.10:51820", "198.51.100.10:51820"],
   "tunnel_cidr": "10.90.0.0/24",
   "server_address": "10.90.0.1/24",
   "server_private_key": "<base64-private-key>",
@@ -87,7 +95,7 @@ Enrollment endpoint:
   "public_key": "<client-public-key>",
   "token": "supersecret",
   "labels": ["web1", "web2"],
-  "domain": "something.domain.tld",
+  "domains": ["something.domain.tld", "api.domain.tld"],
   "proxy_port": 18080
 }
 ```
@@ -99,9 +107,20 @@ Registry endpoint:
 Ingress behavior:
 
 - Head listens on `ingress_listen_addr` (default `:80`)
-- Incoming host `something.domain.tld` is proxied over WG tunnel to enrolled client at `<client_tunnel_ip>:proxy_port`
+- Incoming host `something.domain.tld` (and any registered domain) is proxied over WG tunnel to enrolled client at `<client_tunnel_ip>:proxy_port`
 - Client proxy then forwards to `-to` target (for example `http://localhost:9999`)
 - `labels` are stored as metadata in registry and do not create subdomain routes
+
+HA endpoints:
+
+- Head can return multiple endpoints via `endpoints`
+- Client keeps endpoint candidates and automatically switches when handshake is stale
+
+Multi-head mode:
+
+- Client can enroll to multiple heads in one process (`-heads`)
+- Interface addresses and peers from all heads are merged into one tunnel interface
+- Works best when heads use different VPN subnets / non-overlapping `AllowedIPs`
 
 Key helpers:
 

@@ -30,6 +30,7 @@ type HeadConfig struct {
 	ListenAddr          string   `json:"listen_addr"`
 	IngressListenAddr   string   `json:"ingress_listen_addr"`
 	Endpoint            string   `json:"endpoint"`
+	Endpoints           []string `json:"endpoints"`
 	TunnelCIDR          string   `json:"tunnel_cidr"`
 	ServerAddress       string   `json:"server_address"`
 	ServerPrivateKey    string   `json:"server_private_key"`
@@ -45,6 +46,7 @@ type HeadRuntimeConfig struct {
 	ListenAddr          string
 	IngressListenAddr   string
 	Endpoint            *net.UDPAddr
+	Endpoints           []net.UDPAddr
 	Pool                netip.Prefix
 	ServerAddress       netip.Prefix
 	ServerPrivateKey    wgtypes.Key
@@ -72,7 +74,7 @@ type RegistryEntry struct {
 	IP        string   `json:"ip"`
 	ProxyPort int      `json:"proxy_port"`
 	Labels    []string `json:"labels,omitempty"`
-	Domain    string   `json:"domain,omitempty"`
+	Domains   []string `json:"domains,omitempty"`
 }
 
 func runHead(args []string) error {
@@ -220,7 +222,7 @@ func (s *HeadService) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	labels := normalizeLabels(strings.Join(req.Labels, ","))
-	domain := normalizeDomain(req.Domain)
+	domains := normalizeDomains(req.Domain, req.Domains)
 	proxyPort := req.ProxyPort
 	if proxyPort <= 0 {
 		proxyPort = 18080
@@ -231,7 +233,7 @@ func (s *HeadService) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.registerIngress(pubKey.String(), peerAddr, proxyPort, labels, domain)
+	s.registerIngress(pubKey.String(), peerAddr, proxyPort, labels, domains)
 
 	resp := enrollResponse{
 		ClientAddress:       netip.PrefixFrom(peerAddr, hostBits(peerAddr)).String(),
@@ -239,6 +241,7 @@ func (s *HeadService) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		MTU:                 s.runtime.MTU,
 		ServerPublicKey:     s.runtime.ServerPrivateKey.PublicKey().String(),
 		Endpoint:            s.runtime.Endpoint.String(),
+		Endpoints:           udpAddrsToStrings(s.runtime.Endpoints),
 		AllowedIPs:          prefixesToStrings(s.runtime.AllowedIPs),
 		PersistentKeepalive: int(s.runtime.PersistentKeepalive),
 	}
@@ -261,34 +264,50 @@ func (s *HeadService) requestAuthorizedToken(r *http.Request, bodyToken string) 
 	return true
 }
 
-func (s *HeadService) registerIngress(pubKey string, ip netip.Addr, proxyPort int, labels []string, domain string) {
+func (s *HeadService) registerIngress(pubKey string, ip netip.Addr, proxyPort int, labels []string, domains []string) {
 	entry := RegistryEntry{
 		PublicKey: pubKey,
 		IP:        ip.String(),
 		ProxyPort: proxyPort,
 		Labels:    labels,
-		Domain:    domain,
+		Domains:   domains,
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if old, ok := s.labelRefs[pubKey]; ok {
-		if old.Domain != "" {
-			delete(s.registry, old.Domain)
-		}
-		for _, label := range old.Labels {
-			if old.Domain != "" {
-				delete(s.registry, label+"."+old.Domain)
-			}
+		for _, domain := range old.Domains {
+			delete(s.registry, domain)
 		}
 	}
 
-	if domain != "" {
+	for _, domain := range domains {
 		s.registry[domain] = entry
 	}
 
 	s.labelRefs[pubKey] = entry
+}
+
+func normalizeDomains(single string, many []string) []string {
+	out := make([]string, 0, len(many)+1)
+	seen := map[string]struct{}{}
+	add := func(v string) {
+		v = normalizeDomain(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	add(single)
+	for _, v := range many {
+		add(v)
+	}
+	return out
 }
 
 func requestHost(rawHost string) string {
@@ -444,9 +463,28 @@ func LoadHeadConfig(path string) (*HeadRuntimeConfig, error) {
 		raw.PersistentKeepalive = 25
 	}
 
+	if len(raw.Endpoints) == 0 && strings.TrimSpace(raw.Endpoint) != "" {
+		raw.Endpoints = []string{raw.Endpoint}
+	}
+	if len(raw.Endpoints) == 0 {
+		return nil, errors.New("head config endpoint/endpoints is required")
+	}
+
 	endpoint, err := net.ResolveUDPAddr("udp", raw.Endpoint)
-	if err != nil {
+	if err != nil && len(raw.Endpoints) == 0 {
 		return nil, fmt.Errorf("invalid endpoint: %w", err)
+	}
+
+	resolvedEndpoints := make([]net.UDPAddr, 0, len(raw.Endpoints))
+	for _, item := range raw.Endpoints {
+		ep, epErr := net.ResolveUDPAddr("udp", strings.TrimSpace(item))
+		if epErr != nil {
+			return nil, fmt.Errorf("invalid endpoints entry %q: %w", item, epErr)
+		}
+		resolvedEndpoints = append(resolvedEndpoints, *ep)
+	}
+	if endpoint == nil && len(resolvedEndpoints) > 0 {
+		endpoint = &resolvedEndpoints[0]
 	}
 	pool, err := netip.ParsePrefix(raw.TunnelCIDR)
 	if err != nil {
@@ -475,6 +513,7 @@ func LoadHeadConfig(path string) (*HeadRuntimeConfig, error) {
 		ListenAddr:          raw.ListenAddr,
 		IngressListenAddr:   raw.IngressListenAddr,
 		Endpoint:            endpoint,
+		Endpoints:           resolvedEndpoints,
 		Pool:                pool,
 		ServerAddress:       serverAddress,
 		ServerPrivateKey:    serverPriv,
@@ -511,6 +550,14 @@ func parseJSONAddrs(items []string) ([]netip.Addr, error) {
 }
 
 func addrsToStrings(items []netip.Addr) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.String())
+	}
+	return out
+}
+
+func udpAddrsToStrings(items []net.UDPAddr) []string {
 	out := make([]string, 0, len(items))
 	for _, item := range items {
 		out = append(out, item.String())

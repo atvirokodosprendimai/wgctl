@@ -60,10 +60,13 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to wg-quick style config")
 	headURL := fs.String("head", "", "head base URL (example: http://127.0.0.1:8080)")
+	headsFlag := fs.String("heads", "", "comma separated head URLs for multi-head (example: http://h1:8080,http://h2:8080)")
 	token := fs.String("token", "", "shared token for head enrollment")
+	tokensFlag := fs.String("tokens", "", "comma separated tokens mapped to -heads")
 	privateKey := fs.String("private-key", "", "client private key (base64); generated if empty")
 	labelsFlag := fs.String("labels", "", "comma separated labels for head registry")
 	domainFlag := fs.String("domain", "", "base domain for head registry (example: apps.example.com)")
+	domainsFlag := fs.String("domains", "", "comma separated domains for head registry")
 	proxyPort := fs.Int("proxy-port", 18080, "client proxy listen port for head ingress")
 	proxyTo := fs.String("to", "", "upstream target URL for local proxy (example: http://localhost:9999)")
 	ifName := fs.String("name", defaultTUNName("wg0"), "tunnel interface name")
@@ -76,9 +79,15 @@ func run(args []string) error {
 	var cfg *ClientConfig
 	var err error
 
+	allHeads := parseCSV(strings.TrimSpace(*headsFlag))
 	if strings.TrimSpace(*headURL) != "" {
-		if strings.TrimSpace(*token) == "" {
-			return errors.New("-token is required when -head is set")
+		allHeads = append(allHeads, strings.TrimSpace(*headURL))
+	}
+
+	if len(allHeads) > 0 {
+		headTokens, err := resolveHeadTokens(allHeads, strings.TrimSpace(*token), strings.TrimSpace(*tokensFlag))
+		if err != nil {
+			return err
 		}
 
 		var priv wgtypes.Key
@@ -98,12 +107,25 @@ func run(args []string) error {
 		enrollOpts := EnrollmentOptions{
 			Labels:    normalizeLabels(*labelsFlag),
 			Domain:    normalizeDomain(*domainFlag),
+			Domains:   normalizeLabels(*domainsFlag),
 			ProxyPort: *proxyPort,
 		}
-		cfg, err = FetchClientConfigFromHead(*headURL, *token, priv.PublicKey(), enrollOpts)
-		if err != nil {
-			return err
+		for i, d := range enrollOpts.Domains {
+			enrollOpts.Domains[i] = normalizeDomain(d)
 		}
+
+		for i := range allHeads {
+			hCfg, headErr := FetchClientConfigFromHead(allHeads[i], headTokens[i], priv.PublicKey(), enrollOpts)
+			if headErr != nil {
+				return fmt.Errorf("head enroll failed for %s: %w", allHeads[i], headErr)
+			}
+			if cfg == nil {
+				cfg = hCfg
+				continue
+			}
+			mergeClientConfigs(cfg, hCfg)
+		}
+
 		cfg.Interface.PrivateKey = priv
 	} else {
 		if strings.TrimSpace(*configPath) == "" {
@@ -178,12 +200,16 @@ func run(args []string) error {
 	}
 
 	log.Printf("wireguard userland tunnel %q is up", realName)
+	stopFailover := startEndpointFailover(realName, cfg)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
 	log.Printf("shutting down %q", realName)
+	if stopFailover != nil {
+		stopFailover()
+	}
 	if proxyServer != nil {
 		_ = proxyServer.Close()
 	}
@@ -260,7 +286,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "wgctl: wireguard-go userland client\\n\\n")
 	fmt.Fprintf(os.Stderr, "Usage:\\n")
 	fmt.Fprintf(os.Stderr, "  wgctl run -config client.conf [-name wg0] [-log-level verbose] [-no-system-config]\\n")
-	fmt.Fprintf(os.Stderr, "  wgctl run -head http://127.0.0.1:8080 -token SECRET [-private-key KEY] [-labels a,b] [-domain apps.example.com] [-to http://localhost:9999] [-name wg0]\\n")
+	fmt.Fprintf(os.Stderr, "  wgctl run -head http://127.0.0.1:8080 -token SECRET [-private-key KEY] [-labels a,b] [-domain app.example.com|-domains a.example.com,b.example.com] [-to http://localhost:9999] [-name wg0]\\n")
+	fmt.Fprintf(os.Stderr, "  wgctl run -heads http://h1:8080,http://h2:8080 -tokens t1,t2 [-private-key KEY] [-domains a.example.com,b.example.com] [-to http://localhost:9999]\\n")
 	fmt.Fprintf(os.Stderr, "  wgctl head -config head.json [-name wg-head0] [-log-level verbose] [-no-system-config]\\n")
 	fmt.Fprintf(os.Stderr, "  wgctl genkey\\n")
 	fmt.Fprintf(os.Stderr, "  wgctl genpsk\\n")

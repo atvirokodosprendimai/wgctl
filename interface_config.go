@@ -22,10 +22,11 @@ func configureInterface(name string, cfg *ClientConfig) error {
 }
 
 func configureRoutes(name string, cfg *ClientConfig) error {
-	routes := collectAllowedIPs(cfg)
-	if len(routes) == 0 {
+	routeEntries := collectAllowedRouteEntries(cfg)
+	if len(routeEntries) == 0 {
 		return nil
 	}
+	routes := routePrefixes(routeEntries)
 
 	if err := configureEndpointBypassRoutes(cfg, routes); err != nil {
 		return err
@@ -35,7 +36,7 @@ func configureRoutes(name string, cfg *ClientConfig) error {
 	case "linux":
 		return configureLinuxRoutes(name, routes)
 	case "darwin":
-		return configureDarwinRoutes(name, routes, cfg)
+		return configureDarwinRoutes(name, routeEntries, cfg)
 	default:
 		return fmt.Errorf("automatic route configuration is not implemented for %s", runtime.GOOS)
 	}
@@ -87,22 +88,31 @@ func hasDefaultRoute(routes []netip.Prefix, ipv6 bool) bool {
 func collectPeerEndpointIPs(cfg *ClientConfig) []netip.Addr {
 	out := make([]netip.Addr, 0)
 	seen := map[string]struct{}{}
-
-	for _, peer := range cfg.Peers {
-		if peer.Endpoint == nil {
-			continue
-		}
-		addr, ok := netip.AddrFromSlice(peer.Endpoint.IP)
+	addIP := func(ip net.IP) {
+		addr, ok := netip.AddrFromSlice(ip)
 		if !ok {
-			continue
+			return
 		}
 		addr = addr.Unmap()
 		key := addr.String()
 		if _, exists := seen[key]; exists {
-			continue
+			return
 		}
 		seen[key] = struct{}{}
 		out = append(out, addr)
+	}
+
+	for _, peer := range cfg.Peers {
+		if peer.Endpoint == nil {
+			for i := range peer.EndpointCandidates {
+				addIP(peer.EndpointCandidates[i].IP)
+			}
+			continue
+		}
+		addIP(peer.Endpoint.IP)
+		for i := range peer.EndpointCandidates {
+			addIP(peer.EndpointCandidates[i].IP)
+		}
 	}
 
 	return out
@@ -257,12 +267,23 @@ func configureLinuxRoutes(name string, routes []netip.Prefix) error {
 	return nil
 }
 
-func configureDarwinRoutes(name string, routes []netip.Prefix, cfg *ClientConfig) error {
-	ifa4 := firstInterfaceAddr(cfg.Interface.Address, false)
-	ifa6 := firstInterfaceAddr(cfg.Interface.Address, true)
+func configureDarwinRoutes(name string, routes []routeEntry, cfg *ClientConfig) error {
+	defaultIFA4 := firstInterfaceAddr(cfg.Interface.Address, false)
+	defaultIFA6 := firstInterfaceAddr(cfg.Interface.Address, true)
 
-	for _, route := range routes {
+	for _, entry := range routes {
+		route := entry.Prefix
 		route = route.Masked()
+		ifa4 := defaultIFA4
+		ifa6 := defaultIFA6
+		if entry.Source.IsValid() {
+			if entry.Source.Is4() {
+				ifa4 = entry.Source.String()
+			}
+			if entry.Source.Is6() {
+				ifa6 = entry.Source.String()
+			}
+		}
 		if route.Addr().Is6() {
 			target := route.String()
 			if route.Bits() == 0 {
@@ -339,6 +360,48 @@ func collectAllowedIPs(cfg *ClientConfig) []netip.Prefix {
 		}
 	}
 
+	return out
+}
+
+type routeEntry struct {
+	Prefix netip.Prefix
+	Source netip.Addr
+}
+
+func collectAllowedRouteEntries(cfg *ClientConfig) []routeEntry {
+	out := make([]routeEntry, 0)
+	seen := map[string]struct{}{}
+
+	for _, peer := range cfg.Peers {
+		for _, allowed := range peer.AllowedIPs {
+			allowed = allowed.Masked()
+			key := allowed.String() + "|" + peer.SourceAddress.String()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, routeEntry{Prefix: allowed, Source: peer.SourceAddress})
+		}
+	}
+
+	if len(out) == 0 {
+		return out
+	}
+
+	return out
+}
+
+func routePrefixes(entries []routeEntry) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(entries))
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		k := entry.Prefix.String()
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, entry.Prefix)
+	}
 	return out
 }
 

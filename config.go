@@ -30,6 +30,8 @@ type PeerConfig struct {
 	PublicKey                   wgtypes.Key
 	PresharedKey                *wgtypes.Key
 	Endpoint                    *net.UDPAddr
+	EndpointCandidates          []net.UDPAddr
+	SourceAddress               netip.Addr
 	AllowedIPs                  []netip.Prefix
 	PersistentKeepaliveInterval *time.Duration
 }
