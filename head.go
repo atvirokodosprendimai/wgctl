@@ -274,25 +274,18 @@ func (s *HeadService) registerIngress(pubKey string, ip netip.Addr, proxyPort in
 	defer s.mu.Unlock()
 
 	if old, ok := s.labelRefs[pubKey]; ok {
-		for _, label := range old.Labels {
-			if old.Domain == "" {
-				continue
-			}
-			delete(s.registry, label+"."+old.Domain)
-		}
-		if old.Domain != "" && len(old.Labels) == 0 {
+		if old.Domain != "" {
 			delete(s.registry, old.Domain)
+		}
+		for _, label := range old.Labels {
+			if old.Domain != "" {
+				delete(s.registry, label+"."+old.Domain)
+			}
 		}
 	}
 
 	if domain != "" {
-		if len(labels) == 0 {
-			s.registry[domain] = entry
-		} else {
-			for _, label := range labels {
-				s.registry[label+"."+domain] = entry
-			}
-		}
+		s.registry[domain] = entry
 	}
 
 	s.labelRefs[pubKey] = entry

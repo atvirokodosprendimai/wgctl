@@ -99,8 +99,9 @@ Registry endpoint:
 Ingress behavior:
 
 - Head listens on `ingress_listen_addr` (default `:80`)
-- Incoming host `web1.something.domain.tld` is proxied over WG tunnel to enrolled client at `<client_tunnel_ip>:proxy_port`
+- Incoming host `something.domain.tld` is proxied over WG tunnel to enrolled client at `<client_tunnel_ip>:proxy_port`
 - Client proxy then forwards to `-to` target (for example `http://localhost:9999`)
+- `labels` are stored as metadata in registry and do not create subdomain routes
 
 Key helpers:
 
